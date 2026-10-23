@@ -28,6 +28,9 @@
 #define FX_RV_COMB_TOTAL (1116 + 1188 + 1277 + 1356)
 #define FX_RV_AP_TOTAL (556 + 441)
 #define FX_RV_APR_TOTAL (579 + 457)   /* X0X: the right side's allpasses */
+/* fm1 fork: reverb predelay, int16 at the combs' 12-bit scale; 6656 samples = 150.9 ms. The RAM is
+ * taken from the delay line (engine.c DLY_LEN) */
+#define FX_RV_PRE_LEN 6656
 
 enum { FX_VOLUME, FX_DIST, FX_DRIVE, FX_COMP,
        FX_RV_DECAY, FX_RV_TONE, FX_RV_HPF, FX_RV_LEVEL,
@@ -46,6 +49,8 @@ struct fxbus {
     float apr[FX_RV_APR_TOTAL];       /* X0X stereo: the right side reads the combs with alternating
                                        * signs through its own allpasses (the left is 9W9's) */
     int32_t aposr[2];
+    int16_t pre[FX_RV_PRE_LEN];       /* fm1 fork: predelay line, after the send HPF */
+    int32_t pre_w, pre_d;             /* write position; delay in samples (0: none) */
     /* delay */
     float dl_time_ms, dl_fdbk, dl_tone, dl_level, bpm, wear;
     int32_t dl_div, dl_type;
@@ -76,3 +81,7 @@ int fxbus_nparams(void);
 const x0x_param_t *fxbus_param(int i);
 void fxbus_set(fxbus_t *f, int i, int value);
 int fxbus_get(const fxbus_t *f, int i);
+/* fm1 fork: reverb predelay, pot 0..127 = 0 .. FX_RV_PRE_LEN - 1 samples. Not one of the
+ * FX_NPARAMS pots (those fill sound_t's 16 slots): the UI keeps it in sound.v[T_FX][1][1] */
+void fxbus_set_predelay(fxbus_t *f, int pot);
+int fxbus_predelay_ms(int pot);

@@ -127,6 +127,20 @@ void fxbus_set(fxbus_t *f, int i, int value)
     fx_apply(f, i, v);
 }
 
+/* fm1 fork: reverb predelay (see fxbus.h). A change jumps the read point: a small step in the
+ * reverb's input, which the combs smear */
+void fxbus_set_predelay(fxbus_t *f, int pot)
+{
+    if (pot < 0) pot = 0;
+    if (pot > 127) pot = 127;
+    f->pre_d = pot * (FX_RV_PRE_LEN - 1) / 127;
+}
+
+int fxbus_predelay_ms(int pot)
+{
+    return (pot * (FX_RV_PRE_LEN - 1) / 127) * 1000 / (int)D9_SR;
+}
+
 void fxbus_set_bpm(fxbus_t *f, float bpm)
 {
     if (bpm > 20.0f && bpm != f->bpm) {
@@ -196,10 +210,27 @@ static void fx_reverb(fxbus_t *f, const float *in, float *out, float *out_r, int
     float *ab0 = f->ap, *ab1 = f->ap + fx_al[0];
     float *ar0 = f->apr, *ar1 = f->apr + fx_alr[0];
     int32_t quiet = f->rv_quiet;
+    int16_t *const pre = f->pre;
+    const int32_t pd = f->pre_d;
+    int32_t pw = f->pre_w;
     for (int i = 0; i < n; ++i) {
-        const float x = d9_biquad_tick(&f->rv_hp, in[i]);
+        float x = d9_biquad_tick(&f->rv_hp, in[i]);
         float acc = 0.0f, acc_r = 0.0f;
-        int32_t wr = 0;
+        int32_t wr;
+        {   /* fm1 fork: predelay. Written even at 0, so turning it up never replays old sound;
+             * its write counts as activity, so the idle check sees it empty before stopping */
+            int32_t kp = (int32_t)(x * 2048.0f);
+            if (kp > 32767) kp = 32767;
+            if (kp < -32767) kp = -32767;
+            pre[pw] = (int16_t)kp;
+            wr = kp;
+            if (pd) {
+                int32_t r = pw - pd;
+                if (r < 0) r += FX_RV_PRE_LEN;
+                x = (float)pre[r] * (1.0f / 2048.0f);
+            }
+            pw = pw + 1 >= FX_RV_PRE_LEN ? 0 : pw + 1;
+        }
         for (int c = 0; c < 4; ++c) {
             int16_t *b = cb[c];
             const int32_t p = f->cpos[c];
@@ -248,6 +279,7 @@ static void fx_reverb(fxbus_t *f, const float *in, float *out, float *out_r, int
         quiet = (wr == 0 && in[i] == 0.0f) ? quiet + 1 : 0;
     }
     f->rv_quiet = quiet;
+    f->pre_w = pw;
 }
 
 /* ===================================================================== */

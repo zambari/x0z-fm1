@@ -31,7 +31,30 @@ static const x0x_param_t params[BASS303_NPARAMS] = {
     { "DrvTyp", 2, 1, drv_names },
     { "Slide", 127, 21, 0 },         /* 2 .. 360 ms (Devilfish); 21 = 61 ms, stock is 60 */
     { "AccDec", 127, 7, 0 },         /* 30 .. 3000 ms (Devilfish); 7 = 194 ms, stock is 200 */
+    { "AmpAtk", 127, 0, 0 },         /* fm1 fork: 0 = instant (stock), 1 ms .. 4 s, exponential */
+    { "AmpDec", 127, 0, 0 },         /* fm1 fork: 0 = 303 (gated), else AD time constant 5 ms .. 8 s */
+    { "Gain", 127, 0, 0 },           /* fm1 fork: +0 .. +24 dB before the drive (bass303_gain_db) */
 };
+
+/* fm1 fork */
+float bass303_amp_ms(int i, int v)
+{
+    if (v <= 0)
+        return 0.0f;
+    if (v > 127)
+        v = 127;
+    if (i == BASS303_AMPATK)
+        return fm_exp2f((float)(v - 1) * (11.96578428f / 126.0f));         /* log2(4000) */
+    if (i == BASS303_AMPDEC)
+        return 5.0f * fm_exp2f((float)(v - 1) * (10.64385619f / 126.0f));  /* log2(1600) */
+    return 0.0f;
+}
+
+/* fm1 fork: Gain's boost in dB for a pot value, linear 0 .. +24 dB */
+float bass303_gain_db(int v)
+{
+    return (float)(v < 0 ? 0 : v > 127 ? 127 : v) * (24.0f / 127.0f);
+}
 
 int bass303_nparams(void) { return BASS303_NPARAMS; }
 
@@ -199,6 +222,17 @@ void bass303_set(bass303_t *b, int i, int v)
         b->s_inv = 1.0f / b->s_gain;
         rat_coeffs(b);
         break;
+    case BASS303_AMPATK:                                       /* fm1 fork: linear ramp to 1 */
+        b->atk_inc = v ? 1000.0f / (bass303_amp_ms(i, v) * BASS303_SR) : 0.0f;
+        break;
+    case BASS303_AMPDEC:                                       /* fm1 fork */
+        b->ad_mode = v != 0;
+        if (v)
+            powers(b->ampx_pw, rc_coeff(bass303_amp_ms(i, v), BASS303_SR));
+        break;
+    case BASS303_GAIN:                                         /* fm1 fork */
+        b->pre_gain = fm_db2lin(bass303_gain_db(v));
+        break;
     case BASS303_DRVTYPE:
         if (v != b->drv_type) {                                /* drive.h set_model: fresh state */
             b->s_pre.z1 = b->s_pre.z2 = b->s_post.z1 = b->s_post.z2 = 0.0f;
@@ -255,6 +289,7 @@ void bass303_init(bass303_t *b)
     powers(b->ampd_pw, rc_coeff(1230.0f, BASS303_SR));         /* amp: y += (1 - c)(0 - y) */
     powers(b->ampn_pw, rc_coeff(1.0f, BASS303_SR));            /* release, normal: 1 ms */
     powers(b->ampa_pw, rc_coeff(50.0f, BASS303_SR));           /* release, accented: 50 ms */
+    b->atk_lvl = 1.0f;                                         /* fm1 fork: not attacking */
 
     w = FM_TWO_PI * 200.0f / BASS303_SR;             /* de-clicker: LOWPASS12, q = sqrt(.5) */
     sn = fm_sinf(w);
@@ -519,8 +554,11 @@ static void run(bass303_t *b, float *out, int n)
     float y1 = b->f_y1, y2 = b->f_y2, y3 = b->f_y3, y4 = b->f_y4, fbx = b->fb_x1, fby = b->fb_y1;
     const float osc_freq = b->osc_freq, acc = b->accent_gain;
     const float scaler = b->env_scaler, offset = b->env_offset, cutoff = b->cutoff, r = b->reso;
-    const float *amp_pw = b->gate ? b->ampd_pw : b->amp_acc ? b->ampa_pw : b->ampn_pw;
-    const float amp_boost = b->gate ? 0.45f + 4.0f * acc : 0.0f;
+    /* fm1 fork: in AD mode (AmpDec > 0) the gate is ignored: one decay, and the accent / envelope
+     * boost stays on (scaled by the amp, below) */
+    const int ad = b->ad_mode;
+    const float *amp_pw = ad ? b->ampx_pw : b->gate ? b->ampd_pw : b->amp_acc ? b->ampa_pw : b->ampn_pw;
+    const float amp_boost = (b->gate || ad) ? 0.45f + 4.0f * acc : 0.0f;
     /* the overload guard's lite mode: no oversampling; a change of rate jumps to the new rate's
      * coefficients (snap) rather than gliding between the two rates' values */
     const int lite = b->lite;
@@ -529,7 +567,11 @@ static void run(bass303_t *b, float *out, int n)
     const float hp1_b0 = lite ? b->hp1l_b0 : b->hp1_b0, hp1_a1 = lite ? b->hp1l_a1 : b->hp1_a1;
     const float fb_b0 = lite ? b->fbhpl_b0 : b->fbhp_b0, fb_a1 = lite ? b->fbhpl_a1 : b->fbhp_a1;
     const float sq_dc = b->sq_dc, sq_h2 = 0.5f * b->sq_h;
-    const float out_gain = b->amp_scaler;
+    /* fm1 fork: +6 dB on the dry path while the drive is bypassed, so Drive 0 sits nearer the
+     * driven level (RAT's RMS is +6..+12 dB at the same peak). Same test as bass303_render.
+     * Gain multiplies here too, so it pushes the drive harder (or is plain level when it is off). */
+    const float out_gain = ((b->drv_type != BASS303_DRV_OFF && b->drv_amt > 0.0f)
+                            ? b->amp_scaler : 2.0f * b->amp_scaler) * b->pre_gain;
     const int square = b->wave;
     float os[BASS303_OS];
 
@@ -544,9 +586,27 @@ static void run(bass303_t *b, float *out, int n)
         b->rc1_y = b->rc1_pw[m] * b->rc1_y + b->g1[m] * e0;    /* RC followers of it */
         b->rc2_y = b->rc2_pw[m] * b->rc2_y + (acc > 0.0f ? b->g2[m] * e0 : 0.0f);
         b->slew_y = osc_freq + b->slew_pw[m] * (b->slew_y - osc_freq);
-        if (b->amp_trig) {                                     /* attack 0: 1, then decay */
-            b->amp_y = amp_pw[m - 1];
+        if (b->amp_trig) {
+            if (b->atk_inc > 0.0f) {                           /* fm1 fork: AmpAtk. The decay waits */
+                float from = b->snap ? 0.0f : b->c_a / (1.0f + amp_boost);   /* from where it is */
+                b->amp_y = 1.0f;
+                b->atk_lvl = fm_clampf(from, 0.0f, 1.0f);
+                b->atk_on = 1;
+            } else {                                           /* attack 0: 1, then decay */
+                b->amp_y = amp_pw[m - 1];
+                b->atk_lvl = 1.0f;
+                b->atk_on = 0;
+            }
             b->amp_trig = 0;
+        } else if (b->atk_on) {                                /* fm1 fork */
+            if (!ad && !b->gate) {                             /* stock: released mid-attack, from there */
+                b->amp_y *= b->atk_lvl * amp_pw[m];
+                b->atk_lvl = 1.0f;
+                b->atk_on = 0;
+            } else if ((b->atk_lvl += (float)m * b->atk_inc) >= 1.0f) {
+                b->atk_lvl = 1.0f;
+                b->atk_on = 0;
+            }
         } else {
             b->amp_y *= amp_pw[m];
         }
@@ -555,7 +615,8 @@ static void run(bass303_t *b, float *out, int n)
             b->snap = 1;
         }
         n_inc = b->slew_y * (1.0f / fso);
-        n_a = b->amp_y + amp_boost * b->env_y;
+        n_a = ad ? b->atk_lvl * b->amp_y * (1.0f + amp_boost * b->env_y)   /* fm1 fork: AD */
+                 : b->atk_lvl * (b->amp_y + amp_boost * b->env_y);
         fc = cutoff * fm_exp2f(scaler * (b->rc1_y - offset) + acc * b->rc2_y);   /* n1 = n2 = 1 */
         fc = fm_clampf(fc, 200.0f, 20000.0f);
         /* TeeBeeFilter::calculateCoefficientsApprox4, TB_303 branch only (the a1 polynomial

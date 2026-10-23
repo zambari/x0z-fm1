@@ -68,6 +68,8 @@ enum {
     BASS303_CUTOFF, BASS303_RESO, BASS303_ENVMOD, BASS303_DECAY,     /* page 1 */
     BASS303_ACCENT, BASS303_WAVE, BASS303_TUNE, BASS303_VOLUME,      /* page 2 */
     BASS303_DRIVE, BASS303_DRVTYPE, BASS303_SLIDE, BASS303_ACCDEC,   /* page 3 */
+    BASS303_AMPATK, BASS303_AMPDEC,  /* fm1 fork: amp attack / decay; 0 = stock (old projects load 0) */
+    BASS303_GAIN,                    /* fm1 fork: gain before the drive, 0 = +0 dB (old projects load 0) */
     BASS303_NPARAMS
 };
 enum { BASS303_DRV_OFF, BASS303_DRV_SOFT, BASS303_DRV_RAT };
@@ -126,6 +128,13 @@ typedef struct bass303 {
     float amp_y;             /* amp envelope */
     int amp_acc;             /* the release is the accented one */
     int amp_trig;            /* next sample is the attack */
+    /* fm1 fork: AmpAtk / AmpDec. AmpDec > 0 makes the amp an AD envelope that ignores the gate */
+    float atk_inc;           /* attack ramp per sample (0: instant, stock) */
+    float atk_lvl;           /* attack ramp 0..1; 1 when not attacking */
+    int atk_on;              /* in the attack */
+    int ad_mode;             /* AmpDec > 0 */
+    float ampx_pw[BASS303_CTRL + 1];    /* its decay */
+    float pre_gain;          /* fm1 fork: Gain, linear (0 .. +24 dB), before the drive */
     bass303_df1_t dc;
     float hp1_x1, hp1_y1;
     float f_y1, f_y2, f_y3, f_y4, fb_x1, fb_y1;   /* TeeBeeFilter */
@@ -158,3 +167,7 @@ int bass303_nparams(void);
 const x0x_param_t *bass303_param(int i);
 void bass303_set(bass303_t *b, int i, int value);
 int bass303_get(const bass303_t *b, int i);
+/* fm1 fork: AmpAtk's time / AmpDec's time constant in ms for a pot value; 0 = stock */
+float bass303_amp_ms(int i, int value);
+/* fm1 fork: Gain's boost in dB for a pot value (0 .. +24) */
+float bass303_gain_db(int value);

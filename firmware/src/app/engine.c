@@ -32,7 +32,9 @@ static bass303_t b303[NBASS] POOL;
 static breaks_t brk POOL;
 static fxbus_t fx POOL;
 static master_t mst;
-#define DLY_LEN 88200
+/* fm1 fork: 1.847 s, was 88200 (2 s): the reverb predelay's RAM (fxbus.h FX_RV_PRE_LEN), and 128 B
+ * for the 303s' amp attack / decay. The 1/2. division now halves itself under ~97 BPM (was 90) */
+#define DLY_LEN 81472
 static int16_t dly_buf[DLY_LEN] POOL;
 static volatile uint8_t brk_hold;      /* main loop is rewriting the break loops: ISR leaves it alone */
 static motion_t mot;
@@ -179,7 +181,12 @@ static void apply_param(int t, int v, int i, int val)    /* ISR */
     case T_808: drum808_set(&d808, v, i, val); break;
     case T_303: if (v >= 0 && v < NBASS) bass303_set(&b303[v], i, val); break;
     case T_BRK: breaks_set(&brk, BRK_NSET + i, val); break;
-    case T_FX: fxbus_set(&fx, i, val); break;
+    case T_FX:                                           /* fm1 fork: voice 1 pot 1 is the reverb predelay */
+        if (v == 0)
+            fxbus_set(&fx, i, val);
+        else if (v == 1 && i == 1)
+            fxbus_set_predelay(&fx, val);
+        break;
     case T_MIX:
         if (v < 0 || v >= NPARTS)
             break;
@@ -310,6 +317,7 @@ void engine_apply_sound(const sound_t *s)
             for (i = 0; i < engine_nparams(t, v) && i < NPARAMS_MAX; i++)
                 if (t != T_MST || i < MST_COMP1)
                     engine_set(t, v, i, s->v[t][v][i]);
+    engine_set(T_FX, 1, 1, s->v[T_FX][1][1]);              /* fm1 fork: reverb predelay (ui.c R_PREDLY) */
 }
 
 void engine_drum(int kit, int voice, float vel)

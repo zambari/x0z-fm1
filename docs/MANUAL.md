@@ -280,6 +280,11 @@ A **tie** holds the note before it through the step, so it doesn't play again. O
 tied note joins the note it holds in one long bar. Turning KNOB 1 on a tie makes it a note of
 its own.
 
+**Long notes.** On SEQ, hold a note's step key and press a later step key: the note lasts up to
+and including that step (the steps between become ties), and the screen shows LEN and the number
+of steps. Press its last step again for a one-step note. It works forward within the pattern's
+length.
+
 **Keyboard.** Press REC and all 27 keys become a keyboard (KEYS shows on the top line). The
 notes you play are written: step by step while the pattern is stopped, live while it plays.
 OCT- and OCT+ change the octave. Play a key while still holding another and the 303 slides

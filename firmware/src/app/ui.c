@@ -184,7 +184,8 @@ static void warn(const char *a, const char *b) { say_as(a, b, ANN_NOW | ANN_KEEP
 /* =============================================================== param refs === */
 enum { R_NONE, R_ENG, R_SWING, R_DLEN, R_DRATE, R_BLEN, R_BRATE, R_BDIR, R_BTRANS, R_GEN, R_BRKSET,
        R_BRKSLOT, R_TEMPO, R_ACCENT, R_CLKOUT, R_NOTEOUT, R_PALETTE, R_KEYLED, R_KEYSOUND, R_AUTOSAVE, R_ACT, R_SBAR, R_SPAT,
-       R_SLEN, R_STALLS, R_HDR, R_TAPE, R_MIDICH, R_OUTLOUD, R_SREP, R_BATT, R_USBFULL, R_FREEPLAY, R_CORES };   /* R_TAPE: FX's one-knob TAPE (DIGI .. worn tape) */          /* R_HDR: a list's section header (a = its group), never selected */
+       R_SLEN, R_STALLS, R_HDR, R_TAPE, R_MIDICH, R_OUTLOUD, R_SREP, R_BATT, R_USBFULL, R_FREEPLAY, R_CORES,
+       R_PREDLY };   /* fm1 fork: R_PREDLY, the reverb's predelay (sound.v[T_FX][1][1]) */   /* R_TAPE: FX's one-knob TAPE (DIGI .. worn tape) */          /* R_HDR: a list's section header (a = its group), never selected */
 typedef struct { uint8_t kind, a, b, c; } pref_t;
 #define PR(k, a, b, c) ((pref_t){(k), (a), (b), (c)})
 #define NONE PR(R_NONE, 0, 0, 0)
@@ -301,6 +302,10 @@ static const x0x_param_t *pref_desc(pref_t r)
         static const x0x_param_t d = {"TAPE", 127, 72, 0};
         return &d;
     }
+    case R_PREDLY: {                                     /* fm1 fork */
+        static const x0x_param_t d = {"PREDELAY", 127, 0, 0};
+        return &d;
+    }
     default: return 0;
     }
 }
@@ -356,6 +361,7 @@ static int pref_get(pref_t r)
     case R_SLEN: return song()->len;
     case R_STALLS: return perf.stalls_on;
     case R_TAPE: return proj.sound.v[T_FX][1][0];       /* (kept in an engine slot nothing reads) */
+    case R_PREDLY: return proj.sound.v[T_FX][1][1];     /* fm1 fork: the slot beside TAPE's */
     default: return 0;
     }
 }
@@ -454,6 +460,10 @@ static void pref_set(pref_t r, int v)
         engine_set(T_FX, 0, FX_DL_WEAR, we);
         break;
     }
+    case R_PREDLY:                                    /* fm1 fork: engine.c routes voice 1 pot 1 */
+        proj.sound.v[T_FX][1][1] = (uint8_t)v;
+        engine_set(T_FX, 1, 1, v);
+        break;
     case R_STALLS:
         perf.stalls_on = (uint8_t)v;
         plat_stalls_enable(v);
@@ -577,6 +587,11 @@ static void pref_value_of(pref_t r, int v, char *num, char *unit)
         }
         return;
     }
+    if (r.kind == R_PREDLY) {                            /* fm1 fork */
+        put_i(num, fxbus_predelay_ms(v));
+        put_s(unit, "ms");
+        return;
+    }
     if (is_pan(r)) {                                     /* L64 .. C .. R63 */
         if (v == 64)
             put_s(num, "C");
@@ -603,6 +618,27 @@ static void pref_value_of(pref_t r, int v, char *num, char *unit)
             else {
                 put_i(put_s(num, v < 60 ? "LP " : "HP "), a);
                 put_s(unit, "%");
+            }
+            return;
+        }
+        if (r.a == T_303 && r.c == BASS303_GAIN) {      /* fm1 fork: "+12" "dB" */
+            int db = (int)(bass303_gain_db(v) + 0.5f);
+            put_i(put_s(num, db ? "+" : ""), db);
+            put_s(unit, "dB");
+            return;
+        }
+        if (r.a == T_303 && (r.c == BASS303_AMPATK || r.c == BASS303_AMPDEC)) {   /* fm1 fork */
+            int ms = (int)(bass303_amp_ms(r.c, v) + 0.5f);
+            if (!v)
+                put_s(num, r.c == BASS303_AMPDEC ? "303" : "OFF");
+            else if (ms < 1000) {
+                put_i(num, ms);
+                put_s(unit, "ms");
+            } else {
+                char *q = put_i(num, ms / 1000);
+                *q++ = '.';
+                put_i(q, ms % 1000 / 100);
+                put_s(unit, "s");
             }
             return;
         }
@@ -821,6 +857,8 @@ static void build_pages(void)
                      PR(R_ENG, T_303, b, BASS303_ENVMOD), PR(R_ENG, T_303, b, BASS303_DECAY));
             add_page("VOICE", PR(R_ENG, T_303, b, BASS303_ACCENT), PR(R_ENG, T_303, b, BASS303_WAVE),
                      PR(R_ENG, T_303, b, BASS303_DRIVE), PR(R_ENG, T_303, b, BASS303_SLIDE));
+            add_page("AMP", PR(R_ENG, T_303, b, BASS303_AMPATK), PR(R_ENG, T_303, b, BASS303_AMPDEC),
+                     PR(R_ENG, T_303, b, BASS303_GAIN), NONE);   /* fm1 fork: amp attack / decay, gain */
             more(PR(R_ENG, T_303, b, BASS303_TUNE));
             more(PR(R_ENG, T_303, b, BASS303_VOLUME));
             more(PR(R_ENG, T_303, b, BASS303_DRVTYPE));
@@ -840,7 +878,8 @@ static void build_pages(void)
                  PR(R_GEN, b, 0, G_MUT));
         break;
     case V_FX:                                         /* (each part's sends: MIX's PARTS) */
-        add_page("REVERB", PR(R_ENG, T_FX, 0, FX_RV_DECAY), PR(R_ENG, T_FX, 0, FX_RV_TONE), NONE, NONE);
+        add_page("REVERB", PR(R_ENG, T_FX, 0, FX_RV_DECAY), PR(R_ENG, T_FX, 0, FX_RV_TONE),
+                 PR(R_PREDLY, 0, 0, 0), NONE);           /* fm1 fork: PREDELAY */
         add_page("DELAY", PR(R_ENG, T_FX, 0, FX_DL_TIME), PR(R_ENG, T_FX, 0, FX_DL_FDBK),
                  PR(R_ENG, T_FX, 0, FX_DL_TONE), PR(R_TAPE, 0, 0, 0));
         more(PR(R_ENG, T_FX, 0, FX_RV_HPF));
@@ -2006,6 +2045,39 @@ static void bass_kbd(int key, int down)
     }
 }
 
+/* fm1 fork: how many steps the note at step s lasts: itself and the TIEs after it */
+static int bass_note_len(const bpart_t *bp, int s)
+{
+    int len = bp->len ? bp->len : 16, n = 1;
+    while (n < len && bstep_gate(&bp->step[(s + n) % len]) == G_TIE)
+        n++;
+    return n;
+}
+
+/* fm1 fork: a step held, another pressed after it: the note lasts up to and including that one (TIEs in
+ * between, the TIEs after it rests). Pressing its current last step again: back to one step. Only forward,
+ * within the pattern. */
+static void bass_tie_to(bpart_t *bp, int from, int to)
+{
+    int len = bp->len ? bp->len : 16, s, n;
+    if (to <= from || to >= len || bstep_gate(&bp->step[from]) == G_REST)
+        return;
+    n = bass_note_len(bp, from);
+    if (from + n - 1 == to)                           /* already ends there: one step */
+        to = from;
+    for (s = from + 1; s <= to; s++)
+        bp->step[s].flags = G_TIE;
+    for (; s < len && bstep_gate(&bp->step[s]) == G_TIE; s++)
+        bp->step[s].flags = G_REST;
+    ui.step_edited = 1;                               /* (releasing the held step keeps it) */
+    mark_dirty();
+    {
+        char t[16];
+        put_i(put_s(t, "LENGTH "), bass_note_len(bp, from));
+        say(t, 0);
+    }
+}
+
 /* an edit sounds as the drum keys do (KEY SOUND): while stopped or recording, or always */
 static int key_sounds(void) { return proj.set.keysound || !seq.playing || ui.rec; }
 static void bass_step_key(int white, int down)
@@ -2014,6 +2086,10 @@ static void bass_step_key(int white, int down)
     bpart_t *bp = &cur_pat()->bass[b];
     if (s >= NSTEPS)
         return;
+    if (down && ui.view == V_SEQ && ui.held_step >= 0 && ui.held_step != s) {   /* fm1 fork: note length */
+        bass_tie_to(bp, ui.held_step, s);
+        return;
+    }
     if (down) {                                       /* an empty step is on at once: hold it to edit it */
         ui.held_step = (int8_t)s;
         ui.step_edited = 0;
@@ -3130,6 +3206,8 @@ static void draw_303(int band, int gen)
         q = put_note(q, held_note_of(bp, s) + bp->transpose - 24);
         if (bstep_gate(st) == G_TIE)
             q = put_s(q, " TIE");
+        else if (bstep_gate(st) == G_NOTE && bass_note_len(bp, s) > 1)   /* fm1 fork */
+            q = put_i(put_s(q, " LEN "), bass_note_len(bp, s));
         if (st->flags & BS_ACCENT)
             q = put_s(q, " ACC");
         if (st->flags & BS_SLIDE)
