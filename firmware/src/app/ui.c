@@ -621,9 +621,10 @@ static void pref_value_of(pref_t r, int v, char *num, char *unit)
             }
             return;
         }
-        if (r.a == T_303 && r.c == BASS303_GAIN) {      /* fm1 fork: "+12" "dB" */
-            int db = (int)(bass303_gain_db(v) + 0.5f);
-            put_i(put_s(num, db ? "+" : ""), db);
+        if (r.a == T_303 && r.c == BASS303_GAIN) {      /* fm1 fork: "+12" "-6" "dB" */
+            float g = bass303_gain_db(v);
+            int db = (int)(g + (g < 0.0f ? -0.5f : 0.5f));
+            put_i(put_s(num, db > 0 ? "+" : db < 0 ? "-" : ""), db < 0 ? -db : db);
             put_s(unit, "dB");
             return;
         }
@@ -2078,8 +2079,86 @@ static void bass_tie_to(bpart_t *bp, int from, int to)
     }
 }
 
+/* fm1 fork: the held step's GATE knob walks REST, NOTE, a note 2, 3 or 4 steps long, TIE, and wraps.
+ * State k: 0 REST, 1 NOTE, 2..4 a note k steps long, 5 TIE. A length that would reach the next note
+ * instead ties up to the step before it and sets SLIDE there, so it glides into that note (the last
+ * length offered; a lower one clears that slide). Lengths stop at the pattern's end; TIE is offered only
+ * after a step that sounds (a NOTE or a TIE) to tie to. */
+#define BASS_GS_TIE 1000                              /* above any length */
+
+/* steps from s to the next NOTE after it, or a large number when none is left in the pattern */
+static int bass_next_note(const bpart_t *bp, int s)
+{
+    int len = bp->len ? bp->len : 16, d;
+    for (d = 1; s + d < len; d++)
+        if (bstep_gate(&bp->step[s + d]) == G_NOTE)
+            return d;
+    return 99;
+}
+
+/* the note at s, a NOTE, slides into the next note at its tail's end */
+static int bass_slides_on(const bpart_t *bp, int s)
+{
+    int n = bass_note_len(bp, s);
+    return bass_next_note(bp, s) == n && (bp->step[s + n - 1].flags & BS_SLIDE);
+}
+
+/* the states step s may take, in knob order; returns how many */
+static int bass_gate_states(const bpart_t *bp, int s, int *k)
+{
+    int len = bp->len ? bp->len : 16, m = 0, n, d = bass_next_note(bp, s);
+    k[m++] = 0;
+    k[m++] = 1;
+    for (n = 2; n <= d + 1 && (n <= d ? s + n - 1 < len : 1); n++)
+        k[m++] = n;                                   /* n == d + 1: the slide into the next note */
+    if (s > 0 && bstep_gate(&bp->step[s - 1]) != G_REST)
+        k[m++] = BASS_GS_TIE;
+    return m;
+}
+
+static int bass_gate_state(const bpart_t *bp, int s)
+{
+    int g = bstep_gate(&bp->step[s]), n;
+    if (g == G_TIE)
+        return BASS_GS_TIE;
+    if (g == G_REST)
+        return 0;
+    return bass_note_len(bp, s) + bass_slides_on(bp, s);
+}
+
+static void bass_set_gate_state(bpart_t *bp, int s, int k)
+{
+    int len = bp->len ? bp->len : 16, i, n = k >= 2 && k != BASS_GS_TIE ? k : 1, d;
+    bstep_t *st = &bp->step[s];
+    if (bstep_gate(st) == G_NOTE && bass_slides_on(bp, s))      /* its old slide into the next note */
+        bp->step[s + bass_note_len(bp, s) - 1].flags &= (uint8_t)~BS_SLIDE;
+    for (i = s + 1; i < len && bstep_gate(&bp->step[i]) == G_TIE; i++)   /* its old tail: rests */
+        bp->step[i].flags = G_REST;
+    st->flags = (uint8_t)((st->flags & ~BS_GATE_MASK) | (k == BASS_GS_TIE ? G_TIE : k == 0 ? G_REST : G_NOTE));
+    d = bass_next_note(bp, s);
+    for (i = 1; i < n && i < d && s + i < len; i++)
+        bp->step[s + i].flags = G_TIE;
+    if (n > d)                                        /* reaches the next note: glide into it */
+        bp->step[s + d - 1].flags |= BS_SLIDE;
+}
+
+/* the GATE knob turned by e on step s */
+static void bass_gate_turn(bpart_t *bp, int s, int e)
+{
+    int k[NSTEPS + 3], m = bass_gate_states(bp, s, k), cur = bass_gate_state(bp, s), j = 0, i;
+    for (i = 0; i < m; i++)                           /* its place in the list, or the last one below it */
+        if (k[i] <= cur)
+            j = i;
+    bass_set_gate_state(bp, s, k[(j + (e > 0 ? 1 : m - 1)) % m]);
+}
+
 /* an edit sounds as the drum keys do (KEY SOUND): while stopped or recording, or always */
 static int key_sounds(void) { return proj.set.keysound || !seq.playing || ui.rec; }
+
+/* fm1 fork: the note of the step last touched in SEQ, per 303 line (-1: none yet); a step put on
+ * takes it, so touching a note and then empty steps copies it */
+static int16_t bass_last_note[NBASS] = {-1, -1};
+
 static void bass_step_key(int white, int down)
 {
     int b = bidx(), s = ui.spage * 16 + white;
@@ -2097,13 +2176,19 @@ static void bass_step_key(int white, int down)
         ui.step_created = bstep_gate(&bp->step[s]) == G_REST;
         if (ui.step_created) {
             bp->step[s].flags = G_NOTE;
+            if (ui.view == V_SEQ && bass_last_note[b] >= 0)   /* fm1 fork: the last touched note */
+                bp->step[s].note = (uint8_t)bass_last_note[b];
             mark_dirty();
             sp_step(s, 0);
+        } else if (ui.view == V_SEQ) {
+            bass_last_note[b] = (int16_t)held_note_of(bp, s);   /* fm1 fork */
         }
         ui.step_preview = key_sounds();               /* as the drum keys */
         if (ui.step_preview)
             engine_bass_on(b, bp->step[s].note + bp->transpose - 24, (bp->step[s].flags & BS_ACCENT) != 0, 0);
     } else if (ui.held_step == s) {
+        if (ui.view == V_SEQ && bstep_gate(&bp->step[s]) != G_REST)   /* fm1 fork: its note, as edited */
+            bass_last_note[b] = (int16_t)held_note_of(bp, s);
         if (!ui.step_created && !ui.step_edited && plat_ms() - ui.step_t0 < STEP_TAP_MS) {   /* a tap takes it off */
             bp->step[s].flags = G_REST;
             mark_dirty();
@@ -2621,7 +2706,7 @@ static void input(void)
             if (i == 0) {
                 held_note_by(e);
             } else if (i == 1) {
-                st->flags = (uint8_t)((st->flags & ~BS_GATE_MASK) | (bstep_gate(st) + (e > 0 ? 1 : 2)) % 3);
+                bass_gate_turn(bp, ui.held_step, e);  /* fm1 fork */
             } else if (i == 2) {
                 st->flags ^= BS_ACCENT;
             } else {
@@ -3344,6 +3429,12 @@ static void draw_home(int band)
                 lane((p - 2) * 16 + 1, p, pat_of(p)->brk.steps, eng_step[TRK_BRK], 16, 0);
             }
         }
+        {   /* fm1 fork: existing smoothed audio deadline usage, drawn only on HOME. */
+            uint32_t cpu = plat_cpu_pct();
+            char t[20];
+            put_s(put_i(put_s(t, "CPU "), (int)cpu), "%");
+            text_r(236, 54, &FONT_XS, t, cpu > 85u ? RGB(255, 60, 60) : C_WHITE);
+        }
     }
 }
 
@@ -3420,6 +3511,13 @@ static void draw_fx(int band)
     }
 }
 
+/* fm1 fork: LED duties from the exact bar heights drawn this frame, 0..4 quarters. */
+static uint8_t mix_led_level[11];
+static uint8_t mix_led_duty(int height, int full)
+{
+    return height > 1 ? (uint8_t)((height * 4 + full - 1) / full) : 0;
+}
+
 /* MIX, a drum machine's page: its eleven tracks' levels (and pans), the selected one lit */
 static void draw_drum_mix(int band, int k)
 {
@@ -3437,6 +3535,8 @@ static void draw_drum_mix(int band, int k)
             rbox(x + 7, 4 + fh - f - o, 5, f, 2, muted ? C_DIM : dim(col, sel ? 6 : 4));
         {
             int hf = f * eng_hit[k][v] / 255;
+            if (band == 0)
+                mix_led_level[v] = muted || part_muted(k) ? 0 : mix_led_duty(hf, fh);
             if (hf > 1 && !muted)
                 rbox(x + 7, 4 + fh - hf - o, 5, hf, 2, sel ? C_WHITE : col);
         }
@@ -3468,6 +3568,7 @@ static void draw_mix(int band)
     if (band == 0 && cur_page() != pg.n - 1) {         /* channel strips */
         for (p = 0; p < NPARTS; p++) {
             int x = 6 + p * 38, lvl = proj.sound.v[T_MIX][p][0], pk = eng_peak[p] * 64 / 32768;
+            mix_led_level[p] = part_muted(p) ? 0 : mix_led_duty(pk, 64);
             if (cur_page() == 0 && p == ui.mixsel)       /* PARTS: the part the knobs set */
                 box(x - 2, 0, 30, BAND_H, dim(PART_COL[p], 3));
             rbox(x + 10, 4, 6, 64, 3, C_LINE);
@@ -4063,6 +4164,10 @@ static void draw_knobs(void)
                 cv_rect(i * 60, 14, 1, 50, C_LINE);
             if (i == 0)
                 put_note(v, held_note_of(bp, ui.held_step) + bp->transpose - 24);
+            else if (i == 1 && bstep_gate(st) == G_NOTE && bass_slides_on(bp, ui.held_step))   /* fm1 fork */
+                put_s(v, "SLIDE");
+            else if (i == 1 && bstep_gate(st) == G_NOTE && bass_note_len(bp, ui.held_step) > 1)   /* fm1 fork */
+                put_i(put_s(v, "LEN"), bass_note_len(bp, ui.held_step));
             else if (i == 1)
                 put_s(v, G[bstep_gate(st)]);
             else
@@ -4117,6 +4222,7 @@ static void draw_knobs(void)
 static void leds(void)
 {
     uint32_t b = 0, k = 0, d = 0, i;
+    uint32_t half = 0, threequarter = 0, meter_keys = 0;
     int blink = (ui.frame & 8u) != 0;
     if (seq.playing && eng_step[TRK_DRUM] % 4 == 0)
         b |= 1u << B_PLAY;
@@ -4162,14 +4268,17 @@ static void leds(void)
                 else
                     k |= 1u << BLACK_KEY[i];
             }
-        } else if (ui.view == V_MIX && (cur_page() == 0 || drum_mix_page() >= 0)) {
-            int dm = drum_mix_page(), n = dm >= 0 ? NDRUM : NPARTS, on = dm >= 0 ? ui.sel[dm] : ui.mixsel;
-            for (i = 0; i < (uint32_t)n && i < 11u; i++) {  /* the knobs' channel bright (blinking: muted), */
-                int mu = dm >= 0 ? track_muted(dm, (int)i) : part_muted((int)i);   /* the others dim, muted dark */
-                if ((int)i == on ? !mu || blink : 0)
-                    k |= 1u << BLACK_KEY[i];
-                else if ((int)i != on && !mu)
-                    d |= 1u << BLACK_KEY[i];
+        } else if (ui.view == V_MIX && cur_page() != pg.n - 1) {
+            int n = drum_mix_page() >= 0 ? NDRUM : NPARTS;
+            for (i = 0; i < (uint32_t)n && i < 11u; i++) {
+                uint32_t key = 1u << BLACK_KEY[i];
+                meter_keys |= key;
+                switch (mix_led_level[i]) {
+                case 1: d |= key; break;
+                case 2: half |= key; break;
+                case 3: threequarter |= key; break;
+                case 4: k |= key; break;
+                }
             }
         } else if (ui.view == V_MIX || ui.view == V_FX) {
             /* the master and the effects: the keys have nothing to choose */
@@ -4220,8 +4329,9 @@ static void leds(void)
                 d |= 1u << BLACK_KEY[i];
         }
     }
-    k |= ui.keys;
+    k |= ui.keys & ~meter_keys;                     /* fm1 fork: held meter pads still show their level */
     plat_keys_dim(d & ~k);
+    plat_keys_pwm(half & ~k, threequarter & ~k);
     plat_glow(proj.set.keyled == 1);
     plat_play_red(ui.rec);                           /* PLAY green; red while recording */
     plat_leds(b, k);
@@ -4710,6 +4820,8 @@ void ui_frame(void)
         volatile uint8_t *h = &eng_hit[i / NDRUM][i % NDRUM];
         *h = (uint8_t)(*h - (*h >> 3) - (*h ? 1 : 0));
     }
+    for (i = 0; i < 11u; i++)                       /* fm1 fork: overlays have no visible meters */
+        mix_led_level[i] = 0;
     draw_header();
     draw_main();
     draw_knobs();

@@ -33,6 +33,8 @@ int plat_battery(void);                /* 0..3 bars, 4 = powered by a USB host, 
 void plat_leds(uint32_t buttons, uint32_t keys);   /* lit: bit B_*, bit key */
 void plat_glow(int on);                /* the unlit buttons glow dimly, readable in the dark (call before plat_leds) */
 void plat_keys_dim(uint32_t keys);     /* these keys light dim (a second level; call before plat_leds) */
+/* fm1 fork: 50% and 75% duty; call before plat_leds, zero masks outside the mixer. */
+void plat_keys_pwm(uint32_t half, uint32_t threequarter);
 void plat_play_red(int red);           /* PLAY lights green; red (its other LED) while recording (before plat_leds) */
 
 /* USB MIDI, 4-byte USB-MIDI event packets (cable 0) */

@@ -33,7 +33,7 @@ static const x0x_param_t params[BASS303_NPARAMS] = {
     { "AccDec", 127, 7, 0 },         /* 30 .. 3000 ms (Devilfish); 7 = 194 ms, stock is 200 */
     { "AmpAtk", 127, 0, 0 },         /* fm1 fork: 0 = instant (stock), 1 ms .. 4 s, exponential */
     { "AmpDec", 127, 0, 0 },         /* fm1 fork: 0 = 303 (gated), else AD time constant 5 ms .. 8 s */
-    { "Gain", 127, 0, 0 },           /* fm1 fork: +0 .. +24 dB before the drive (bass303_gain_db) */
+    { "Gain", 127, 64, 0 },          /* fm1 fork: -48 .. +48 dB before the drive, 64 = 0 dB (bass303_gain_db) */
 };
 
 /* fm1 fork */
@@ -50,10 +50,12 @@ float bass303_amp_ms(int i, int v)
     return 0.0f;
 }
 
-/* fm1 fork: Gain's boost in dB for a pot value, linear 0 .. +24 dB */
+/* fm1 fork: Gain in dB for a pot value, linear -48 .. +48 dB, 64 = 0 dB (each half its own slope,
+ * so both ends are exact) */
 float bass303_gain_db(int v)
 {
-    return (float)(v < 0 ? 0 : v > 127 ? 127 : v) * (24.0f / 127.0f);
+    v = v < 0 ? 0 : v > 127 ? 127 : v;
+    return v < 64 ? (float)(v - 64) * (48.0f / 64.0f) : (float)(v - 64) * (48.0f / 63.0f);
 }
 
 int bass303_nparams(void) { return BASS303_NPARAMS; }

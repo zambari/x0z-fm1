@@ -16,6 +16,7 @@
 #include "x0x.h"
 #include "../dsp/drum909.h"            /* DR_SD (the sound's revisions) */
 #include "../dsp/master.h"             /* MST_* (the sound's revisions) */
+#include "../dsp/bass303.h"            /* fm1 fork: BASS303_GAIN (the sound's revision 6) */
 #include "lz.c"
 
 project_t proj;
@@ -503,6 +504,17 @@ int project_load(void)
         sound_rev2();
     if (sound_ok && proj.set.snd_rev < 5)             /* before the break's FILTER: off (its pot held a 0) */
         proj.sound.v[T_BRK][0][2] = engine_param(T_BRK, 0, 2)->def;
+    if (sound_ok && proj.set.snd_rev < 6)             /* fm1 fork: the 303s' Gain was 0 .. +24 dB (or absent, */
+        for (i = 0; i < NBASS; i++) {                 /* 0): the same dB on the -24 .. +24 knob */
+            uint8_t *g = &proj.sound.v[T_303][i][BASS303_GAIN];
+            *g = (uint8_t)(64 + (*g * 63 + 63) / 127);
+        }
+    if (sound_ok && proj.set.snd_rev < 7)             /* fm1 fork: -24 .. +24 dB became -48 .. +48: the */
+        for (i = 0; i < NBASS; i++) {                 /* same dB, half as far from the centre */
+            uint8_t *g = &proj.sound.v[T_303][i][BASS303_GAIN];
+            int d = (int)*g - 64;
+            *g = (uint8_t)(64 + (d < 0 ? -((1 - d) / 2) : (d + 1) / 2));
+        }
     proj.set.snd_rev = PROJ_SND_REV;
     return bad ? -1 : 0;
 }

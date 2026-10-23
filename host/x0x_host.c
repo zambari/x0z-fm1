@@ -104,6 +104,8 @@ static int glow_on = 1;                 /* the device's button glow (plat_glow);
 void plat_glow(int on) { glow_on = on; }
 void plat_play_red(int red) { (void)red; }
 void plat_keys_dim(uint32_t k) { dim_keys = k; }      /* dim keys: "o" in the leds print */      /* the device's PLAY colour: green, red while recording */
+/* fm1 fork: the host display has only dim/full; retain intermediate keys as dim. */
+void plat_keys_pwm(uint32_t half, uint32_t threequarter) { dim_keys |= half | threequarter; }
 
 #define MQ 256
 static uint32_t min_q[MQ], mi_w, mi_r;
